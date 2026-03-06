@@ -26,7 +26,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
-import com.example.recuerdos.ui.theme.RecuerdosTheme
+import com.example.recuerdosMLJDMH.R
 import kotlinx.coroutines.delay
 
 class SplashActivity : ComponentActivity() {
@@ -66,8 +66,6 @@ private fun SplashScreen(
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         Image(
-            // `ic_launcher` suele ser un adaptive icon (mipmap XML) y puede fallar con painterResource().
-            // Usamos el foreground (drawable) que sí es compatible con Compose.
             painter = painterResource(id = R.drawable.ic_launcher_foreground),
             contentDescription = null,
             modifier = Modifier.size(96.dp)
@@ -86,4 +84,3 @@ private fun SplashScreen(
         }
     }
 }
-
