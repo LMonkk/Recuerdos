@@ -47,6 +47,7 @@ class UserPreferences(private val context: Context) {
         val USER_NAME_KEY = stringPreferencesKey("user_name")
         val USER_TYPE_KEY = stringPreferencesKey("user_type")
         val IS_REGISTERED_KEY = booleanPreferencesKey("is_registered")
+        val PACIENTES_KEY = stringPreferencesKey("pacientes")
     }
 
     suspend fun saveUserInfo(name: String, userType: String) {
@@ -54,6 +55,19 @@ class UserPreferences(private val context: Context) {
             preferences[USER_NAME_KEY] = name
             preferences[USER_TYPE_KEY] = userType
             preferences[IS_REGISTERED_KEY] = true
+        }
+    }
+
+    suspend fun savePacientes(pacientes: List<Paciente>) {
+        val json = if (pacientes.isEmpty()) {
+            ""  // Guardar cadena vacía si no hay pacientes
+        } else {
+            pacientes.joinToString("||") { p ->
+                "${p.nombre}|${p.edad}|${p.tipoDemencia}|${p.institucion}|${p.contactoEmergencia}|${p.alergias}|${p.observaciones}"
+            }
+        }
+        context.dataStore.edit { preferences ->
+            preferences[PACIENTES_KEY] = json
         }
     }
 
@@ -65,6 +79,34 @@ class UserPreferences(private val context: Context) {
 
     val isRegistered: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[IS_REGISTERED_KEY] ?: false }
+
+    // CORREGIDO: Manejo correcto de casos vacíos
+    val pacientes: Flow<List<Paciente>> = context.dataStore.data
+        .map { preferences ->
+            val json = preferences[PACIENTES_KEY] ?: ""
+            if (json.isBlank()) {
+                emptyList()  // Si está vacío, retornar lista vacía
+            } else {
+                json.split("||").mapNotNull { pacienteStr ->  // Usar mapNotNull para filtrar vacíos
+                    if (pacienteStr.isBlank()) return@mapNotNull null
+
+                    val parts = pacienteStr.split("|", limit = 7)
+                    // Verificar que al menos tenga nombre (campo obligatorio)
+                    val nombre = parts.getOrElse(0) { "" }
+                    if (nombre.isBlank()) return@mapNotNull null
+
+                    Paciente(
+                        nombre = nombre,
+                        edad = parts.getOrElse(1) { "" },
+                        tipoDemencia = parts.getOrElse(2) { "" },
+                        institucion = parts.getOrElse(3) { "" },
+                        contactoEmergencia = parts.getOrElse(4) { "" },
+                        alergias = parts.getOrElse(5) { "" },
+                        observaciones = parts.getOrElse(6) { "" }
+                    )
+                }
+            }
+        }
 }
 
 data class Paciente(
@@ -211,7 +253,21 @@ fun RegistrationScreen(onRegisterComplete: (String, String) -> Unit) {
 
 @Composable
 fun MainAppScreen(userName: String, userType: String) {
-    val pacientes = remember { mutableStateListOf<Paciente>() }
+    val context = LocalContext.current
+    val userPreferences = remember { UserPreferences(context) }
+    val coroutineScope = rememberCoroutineScope()
+
+    var pacientes by remember { mutableStateOf<List<Paciente>>(emptyList()) }
+    var isLoading by remember { mutableStateOf(true) }
+
+    // Cargar pacientes al iniciar
+    LaunchedEffect(Unit) {
+        userPreferences.pacientes.collect { lista ->
+            pacientes = lista
+            isLoading = false
+        }
+    }
+
     var tabSeleccionada by rememberSaveable { mutableIntStateOf(0) }
     val destinos = listOf(
         DestinoPrincipal.Pacientes,
@@ -237,10 +293,27 @@ fun MainAppScreen(userName: String, userType: String) {
         }
     ) { innerPadding ->
         Box(modifier = Modifier.padding(innerPadding)) {
-            when (tabSeleccionada) {
-                0 -> PacientesScreen(pacientes = pacientes, userName = userName, userType = userType)
-                1 -> RecordatoriosScreen(userName = userName)
-                2 -> PerfilScreen(userName = userName, userType = userType)
+            if (isLoading) {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+            } else {
+                when (tabSeleccionada) {
+                    0 -> PacientesScreen(
+                        pacientes = pacientes.toMutableStateList(),
+                        userName = userName,
+                        userType = userType,
+                        onPacientesChange = { nuevaLista ->
+                            pacientes = nuevaLista
+                            // Guardar automáticamente cuando cambia la lista
+                            coroutineScope.launch {
+                                userPreferences.savePacientes(nuevaLista)
+                            }
+                        }
+                    )
+                    1 -> RecordatoriosScreen(userName = userName)
+                    2 -> PerfilScreen(userName = userName, userType = userType)
+                }
             }
         }
     }
@@ -250,7 +323,8 @@ fun MainAppScreen(userName: String, userType: String) {
 fun PacientesScreen(
     pacientes: MutableList<Paciente>,
     userName: String,
-    userType: String
+    userType: String,
+    onPacientesChange: (List<Paciente>) -> Unit
 ) {
     var mostrarFormulario by remember { mutableStateOf(true) }
     var nombre by remember { mutableStateOf("") }
@@ -289,7 +363,7 @@ fun PacientesScreen(
                 modifier = peso,
                 colors = if (mostrarFormulario) ButtonDefaults.buttonColors() else ButtonDefaults.outlinedButtonColors()
             ) { Text("Registrar") }
-            
+
             Button(
                 onClick = { mostrarFormulario = false },
                 modifier = peso,
@@ -310,13 +384,21 @@ fun PacientesScreen(
                 observaciones = observaciones, onObservacionesChange = { observaciones = it },
                 onGuardar = {
                     if (nombre.isNotBlank()) {
-                        pacientes.add(Paciente(nombre, edad, tipoDemencia, institucion, contactoEmergencia, alergias, observaciones))
+                        val nuevoPaciente = Paciente(nombre, edad, tipoDemencia, institucion, contactoEmergencia, alergias, observaciones)
+                        val nuevaLista = pacientes.toList() + nuevoPaciente
+                        onPacientesChange(nuevaLista)
                         nombre = ""; edad = ""; tipoDemencia = ""; institucion = ""; contactoEmergencia = ""; alergias = ""; observaciones = ""
                     }
                 }
             )
         } else {
-            ListaPacientesScreen(pacientes = pacientes)
+            ListaPacientesScreen(
+                pacientes = pacientes,
+                onEliminar = { pacienteAEliminar ->
+                    val nuevaLista = pacientes.toList() - pacienteAEliminar
+                    onPacientesChange(nuevaLista)
+                }
+            )
         }
     }
 }
@@ -357,7 +439,10 @@ fun FormularioPacienteScreen(
 }
 
 @Composable
-fun ListaPacientesScreen(pacientes: List<Paciente>) {
+fun ListaPacientesScreen(
+    pacientes: MutableList<Paciente>,
+    onEliminar: (Paciente) -> Unit
+) {
     if (pacientes.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No hay pacientes registrados", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
@@ -365,17 +450,54 @@ fun ListaPacientesScreen(pacientes: List<Paciente>) {
     } else {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(pacientes) { paciente ->
-                PacienteCard(paciente = paciente)
+                PacienteCard(
+                    paciente = paciente,
+                    onEliminar = { onEliminar(paciente) },
+                    onAccionFutura = { }
+                )
             }
         }
     }
 }
 
 @Composable
-fun PacienteCard(paciente: Paciente) {
+fun PacienteCard(
+    paciente: Paciente,
+    onEliminar: () -> Unit,
+    onAccionFutura: () -> Unit
+) {
+    var mostrarDialogo by remember { mutableStateOf(false) }
+
     Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
         Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Text(text = paciente.nombre, style = MaterialTheme.typography.titleMedium)
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = paciente.nombre, style = MaterialTheme.typography.titleMedium)
+
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    IconButton(onClick = onAccionFutura) {
+                        Icon(
+                            Icons.Default.Edit,
+                            contentDescription = "Función futura",
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                    }
+
+                    IconButton(onClick = { mostrarDialogo = true }) {
+                        Icon(
+                            Icons.Default.Delete,
+                            contentDescription = "Eliminar paciente",
+                            tint = MaterialTheme.colorScheme.error
+                        )
+                    }
+                }
+            }
+
             if (paciente.edad.isNotBlank()) Text("Edad: ${paciente.edad}", style = MaterialTheme.typography.bodyMedium)
             if (paciente.tipoDemencia.isNotBlank()) Text("Demencia: ${paciente.tipoDemencia}", style = MaterialTheme.typography.bodySmall)
             if (paciente.institucion.isNotBlank()) Text("Institución: ${paciente.institucion}", style = MaterialTheme.typography.bodySmall)
@@ -383,6 +505,29 @@ fun PacienteCard(paciente: Paciente) {
             if (paciente.alergias.isNotBlank()) Text("Alergias: ${paciente.alergias}", style = MaterialTheme.typography.bodySmall)
             if (paciente.observaciones.isNotBlank()) Text("Obs: ${paciente.observaciones}", style = MaterialTheme.typography.bodySmall)
         }
+    }
+
+    if (mostrarDialogo) {
+        AlertDialog(
+            onDismissRequest = { mostrarDialogo = false },
+            title = { Text("Confirmar eliminación") },
+            text = { Text("¿Estás seguro de que quieres eliminar a ${paciente.nombre}? Esta acción no se puede deshacer.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        onEliminar()
+                        mostrarDialogo = false
+                    }
+                ) {
+                    Text("Eliminar", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { mostrarDialogo = false }) {
+                    Text("Cancelar")
+                }
+            }
+        )
     }
 }
 
