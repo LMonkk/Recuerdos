@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,6 +20,7 @@ import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
@@ -37,6 +39,10 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+import java.util.Calendar
+import java.util.UUID
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
 
 // DataStore extension
 val Context.dataStore by preferencesDataStore(name = "user_preferences")
@@ -48,6 +54,7 @@ class UserPreferences(private val context: Context) {
         val USER_TYPE_KEY = stringPreferencesKey("user_type")
         val IS_REGISTERED_KEY = booleanPreferencesKey("is_registered")
         val PACIENTES_KEY = stringPreferencesKey("pacientes")
+        val ALARMAS_KEY = stringPreferencesKey("alarmas")
     }
 
     suspend fun saveUserInfo(name: String, userType: String) {
@@ -60,14 +67,33 @@ class UserPreferences(private val context: Context) {
 
     suspend fun savePacientes(pacientes: List<Paciente>) {
         val json = if (pacientes.isEmpty()) {
-            ""  // Guardar cadena vacía si no hay pacientes
+            ""
         } else {
             pacientes.joinToString("||") { p ->
-                "${p.nombre}|${p.edad}|${p.tipoDemencia}|${p.institucion}|${p.contactoEmergencia}|${p.alergias}|${p.observaciones}"
+                "${p.id}|${p.nombre}|${p.edad}|${p.tipoDemencia}|${p.institucion}|${p.contactoEmergencia}|${p.alergias}|${p.observaciones}"
             }
         }
         context.dataStore.edit { preferences ->
             preferences[PACIENTES_KEY] = json
+        }
+    }
+
+    // Guardar alarmas con NUEVO ORDEN: id|pacienteId|titulo|hora|minuto|activa|soloNotificacion|notas
+    suspend fun saveAlarmas(alarmas: List<Alarma>) {
+        val json = if (alarmas.isEmpty()) {
+            ""
+        } else {
+            alarmas.joinToString("||") { a ->
+                // AHORA CON 7 CAMPOS (sin notas)
+                "${a.id}|${a.pacienteId}|${a.titulo}|${a.hora}|${a.minuto}|${a.activa}|${a.soloNotificacion}"
+            }
+        }
+
+        println("💾 Guardando ${alarmas.size} alarmas")
+        println("📝 JSON: $json")
+
+        context.dataStore.edit { preferences ->
+            preferences[ALARMAS_KEY] = json
         }
     }
 
@@ -80,36 +106,85 @@ class UserPreferences(private val context: Context) {
     val isRegistered: Flow<Boolean> = context.dataStore.data
         .map { preferences -> preferences[IS_REGISTERED_KEY] ?: false }
 
-    // CORREGIDO: Manejo correcto de casos vacíos
     val pacientes: Flow<List<Paciente>> = context.dataStore.data
         .map { preferences ->
             val json = preferences[PACIENTES_KEY] ?: ""
+            println("📖 [pacientes] Cargando pacientes - JSON: $json")
+
             if (json.isBlank()) {
-                emptyList()  // Si está vacío, retornar lista vacía
+                println("📖 [pacientes] No hay pacientes guardados")
+                emptyList()
             } else {
-                json.split("||").mapNotNull { pacienteStr ->  // Usar mapNotNull para filtrar vacíos
+                val lista = json.split("||").mapNotNull { pacienteStr ->
                     if (pacienteStr.isBlank()) return@mapNotNull null
 
-                    val parts = pacienteStr.split("|", limit = 7)
-                    // Verificar que al menos tenga nombre (campo obligatorio)
-                    val nombre = parts.getOrElse(0) { "" }
+                    val parts = pacienteStr.split("|", limit = 8)
+                    val id = parts.getOrElse(0) { UUID.randomUUID().toString() }
+                    val nombre = parts.getOrElse(1) { "" }
                     if (nombre.isBlank()) return@mapNotNull null
 
                     Paciente(
+                        id = id,
                         nombre = nombre,
-                        edad = parts.getOrElse(1) { "" },
-                        tipoDemencia = parts.getOrElse(2) { "" },
-                        institucion = parts.getOrElse(3) { "" },
-                        contactoEmergencia = parts.getOrElse(4) { "" },
-                        alergias = parts.getOrElse(5) { "" },
-                        observaciones = parts.getOrElse(6) { "" }
+                        edad = parts.getOrElse(2) { "" },
+                        tipoDemencia = parts.getOrElse(3) { "" },
+                        institucion = parts.getOrElse(4) { "" },
+                        contactoEmergencia = parts.getOrElse(5) { "" },
+                        alergias = parts.getOrElse(6) { "" },
+                        observaciones = parts.getOrElse(7) { "" }
                     )
                 }
+                println("📖 [pacientes] Cargados ${lista.size} pacientes")
+                lista
+            }
+        }
+
+    // Leer alarmas con NUEVO ORDEN: id|pacienteId|titulo|hora|minuto|activa|soloNotificacion|notas
+    val alarmas: Flow<List<Alarma>> = context.dataStore.data
+        .map { preferences ->
+            val json = preferences[ALARMAS_KEY] ?: ""
+            println("📖 [alarmas] LEYENDO ALARMAS - JSON: $json")
+
+            if (json.isBlank()) {
+                println("📖 [alarmas] No hay alarmas guardadas")
+                emptyList()
+            } else {
+                val lista = json.split("||").mapNotNull { alarmaStr ->
+                    if (alarmaStr.isBlank()) return@mapNotNull null
+
+                    val parts = alarmaStr.split("|", limit = 7)  // ⬅️ AHORA limit = 7
+                    if (parts.size >= 7) {  // ⬅️ AHORA verificamos 7 campos
+                        try {
+                            val alarma = Alarma(
+                                id = parts[0],
+                                pacienteId = parts[1],
+                                titulo = parts[2],
+                                hora = parts[3].toIntOrNull() ?: 0,
+                                minuto = parts[4].toIntOrNull() ?: 0,
+                                activa = parts[5].toBoolean(),
+                                soloNotificacion = parts[6].toBoolean()
+                                // ✅ NOTAS ELIMINADO
+                            )
+                            println("   ✅ Alarma: ${alarma.titulo} → Paciente ID: '${alarma.pacienteId}'")
+                            alarma
+                        } catch (e: Exception) {
+                            println("   ❌ Error parseando alarma: ${e.message}")
+                            null
+                        }
+                    } else {
+                        println("   ❌ Formato incorrecto: $alarmaStr (solo ${parts.size} campos, se esperaban 7)")
+                        null
+                    }
+                }
+                println("📖 [alarmas] ALARMAS CARGADAS: ${lista.size} alarmas")
+                lista
             }
         }
 }
 
+// Data class Paciente (sin cambios)
 data class Paciente(
+    val id: String = UUID.randomUUID().toString(),
     val nombre: String,
     val edad: String,
     val tipoDemencia: String,
@@ -117,6 +192,18 @@ data class Paciente(
     val contactoEmergencia: String,
     val alergias: String,
     val observaciones: String
+)
+
+// SIN notas
+data class Alarma(
+    val id: String = UUID.randomUUID().toString(),
+    val pacienteId: String = "",
+    val titulo: String,
+    val hora: Int,
+    val minuto: Int,
+    val activa: Boolean = true,
+    val soloNotificacion: Boolean = false
+    // ✅ NOTAS ELIMINADO
 )
 
 enum class UserType(val displayName: String, val value: String) {
@@ -133,6 +220,16 @@ sealed class DestinoPrincipal(val titulo: String, val icono: ImageVector) {
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        lifecycleScope.launch {
+            val userPrefs = UserPreferences(this@MainActivity)
+            val alarmasIniciales = userPrefs.alarmas.first()
+            println("🔍 [MainActivity] VERIFICACIÓN AL INICIAR: ${alarmasIniciales.size} alarmas encontradas")
+            alarmasIniciales.forEachIndexed { index, alarma ->
+                println("   [$index] ${alarma.titulo} (${alarma.hora}:${alarma.minuto}) → paciente: '${alarma.pacienteId}'")
+            }
+        }
+
         enableEdgeToEdge()
         setContent {
             RecuerdosTheme {
@@ -158,6 +255,8 @@ fun RecuerdosApp() {
         userName = userPreferences.userName.first()
         userType = userPreferences.userType.first()
         isLoading = false
+
+        println("📱 [RecuerdosApp] Usuario: $userName, Tipo: $userType, Registrado: $isRegistered")
     }
 
     if (isLoading) {
@@ -173,6 +272,7 @@ fun RecuerdosApp() {
                         isRegistered = true
                         userName = name
                         userType = type
+                        println("✅ [RecuerdosApp] Registro completado: $name, $type")
                     }
                 }
             )
@@ -253,18 +353,52 @@ fun RegistrationScreen(onRegisterComplete: (String, String) -> Unit) {
 
 @Composable
 fun MainAppScreen(userName: String, userType: String) {
+
     val context = LocalContext.current
     val userPreferences = remember { UserPreferences(context) }
     val coroutineScope = rememberCoroutineScope()
 
     var pacientes by remember { mutableStateOf<List<Paciente>>(emptyList()) }
+    var alarmas by remember { mutableStateOf<List<Alarma>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
 
-    // Cargar pacientes al iniciar
     LaunchedEffect(Unit) {
-        userPreferences.pacientes.collect { lista ->
-            pacientes = lista
-            isLoading = false
+        println("🔄 [MainAppScreen] Iniciando carga de datos...")
+
+        val pacientesCargados = try {
+            userPreferences.pacientes.first()
+        } catch (e: Exception) {
+            println("❌ [MainAppScreen] Error cargando pacientes: ${e.message}")
+            emptyList()
+        }
+
+        val alarmasCargadas = try {
+            userPreferences.alarmas.first()
+        } catch (e: Exception) {
+            println("❌ [MainAppScreen] Error cargando alarmas: ${e.message}")
+            emptyList()
+        }
+
+        pacientes = pacientesCargados
+        alarmas = alarmasCargadas
+        isLoading = false
+
+        println("✅ [MainAppScreen] Carga inicial - Pacientes: ${pacientesCargados.size}, Alarmas: ${alarmasCargadas.size}")
+        println("📋 [MainAppScreen] IDs de pacientes: ${pacientesCargados.map { it.id }}")
+        println("📋 [MainAppScreen] IDs de alarmas cargadas: ${alarmasCargadas.map { it.id }}")
+
+        alarmasCargadas.groupBy { it.pacienteId }.forEach { (pacienteId, alarmasDelPaciente) ->
+            println("   👤 Paciente ID '$pacienteId' tiene ${alarmasDelPaciente.size} alarmas")
+        }
+    }
+
+    LaunchedEffect(Unit) {
+        userPreferences.alarmas.collect { nuevasAlarmas ->
+            if (!isLoading) {
+                println("🔄 [MainAppScreen] Detectado cambio en alarmas: ${nuevasAlarmas.size} alarmas")
+                println("   IDs: ${nuevasAlarmas.map { it.id }}")
+                alarmas = nuevasAlarmas
+            }
         }
     }
 
@@ -301,13 +435,25 @@ fun MainAppScreen(userName: String, userType: String) {
                 when (tabSeleccionada) {
                     0 -> PacientesScreen(
                         pacientes = pacientes.toMutableStateList(),
+                        alarmas = alarmas,
                         userName = userName,
                         userType = userType,
-                        onPacientesChange = { nuevaLista ->
-                            pacientes = nuevaLista
-                            // Guardar automáticamente cuando cambia la lista
+                        onPacientesChange = { nuevaListaPacientes ->
+                            println("📝 [MainAppScreen] Cambiando pacientes: ${pacientes.size} → ${nuevaListaPacientes.size}")
+                            pacientes = nuevaListaPacientes
                             coroutineScope.launch {
-                                userPreferences.savePacientes(nuevaLista)
+                                userPreferences.savePacientes(nuevaListaPacientes)
+                            }
+                        },
+                        onAlarmasChange = { nuevasAlarmas ->
+                            println("📝 [MainAppScreen] Cambiando alarmas: ${alarmas.size} → ${nuevasAlarmas.size}")
+                            println("   Nuevas alarmas IDs: ${nuevasAlarmas.map { it.id }}")
+
+                            alarmas = nuevasAlarmas.toList()
+
+                            coroutineScope.launch {
+                                userPreferences.saveAlarmas(nuevasAlarmas)
+                                println("💾 [MainAppScreen] Guardadas ${nuevasAlarmas.size} alarmas en DataStore")
                             }
                         }
                     )
@@ -322,9 +468,11 @@ fun MainAppScreen(userName: String, userType: String) {
 @Composable
 fun PacientesScreen(
     pacientes: MutableList<Paciente>,
+    alarmas: List<Alarma>,
     userName: String,
     userType: String,
-    onPacientesChange: (List<Paciente>) -> Unit
+    onPacientesChange: (List<Paciente>) -> Unit,
+    onAlarmasChange: (List<Alarma>) -> Unit
 ) {
     var mostrarFormulario by remember { mutableStateOf(true) }
     var nombre by remember { mutableStateOf("") }
@@ -334,6 +482,10 @@ fun PacientesScreen(
     var contactoEmergencia by remember { mutableStateOf("") }
     var alergias by remember { mutableStateOf("") }
     var observaciones by remember { mutableStateOf("") }
+
+    println("🏥 [PacientesScreen] Renderizando - Pacientes: ${pacientes.size}, Alarmas totales: ${alarmas.size}")
+    println("   IDs pacientes: ${pacientes.map { it.id }}")
+    println("   IDs pacientes en alarmas: ${alarmas.map { it.pacienteId }.distinct()}")
 
     Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
         Card(
@@ -384,19 +536,63 @@ fun PacientesScreen(
                 observaciones = observaciones, onObservacionesChange = { observaciones = it },
                 onGuardar = {
                     if (nombre.isNotBlank()) {
-                        val nuevoPaciente = Paciente(nombre, edad, tipoDemencia, institucion, contactoEmergencia, alergias, observaciones)
+                        val nuevoPaciente = Paciente(
+                            id = UUID.randomUUID().toString(),
+                            nombre = nombre,
+                            edad = edad,
+                            tipoDemencia = tipoDemencia,
+                            institucion = institucion,
+                            contactoEmergencia = contactoEmergencia,
+                            alergias = alergias,
+                            observaciones = observaciones
+                        )
+                        println("➕ [PacientesScreen] Nuevo paciente creado: ${nuevoPaciente.nombre} (ID: ${nuevoPaciente.id})")
                         val nuevaLista = pacientes.toList() + nuevoPaciente
                         onPacientesChange(nuevaLista)
-                        nombre = ""; edad = ""; tipoDemencia = ""; institucion = ""; contactoEmergencia = ""; alergias = ""; observaciones = ""
+                        nombre = ""
+                        edad = ""
+                        tipoDemencia = ""
+                        institucion = ""
+                        contactoEmergencia = ""
+                        alergias = ""
+                        observaciones = ""
                     }
                 }
             )
         } else {
             ListaPacientesScreen(
                 pacientes = pacientes,
+                alarmas = alarmas,
                 onEliminar = { pacienteAEliminar ->
-                    val nuevaLista = pacientes.toList() - pacienteAEliminar
-                    onPacientesChange(nuevaLista)
+                    println("🗑️ [PacientesScreen] Eliminando paciente: ${pacienteAEliminar.nombre} (ID: ${pacienteAEliminar.id})")
+
+                    val nuevaListaPacientes = pacientes.toList().filter { it.id != pacienteAEliminar.id }
+                    onPacientesChange(nuevaListaPacientes)
+
+                    val nuevasAlarmas = alarmas.filter { it.pacienteId != pacienteAEliminar.id }
+                    println("   Alarmas eliminadas: ${alarmas.size - nuevasAlarmas.size}")
+                    onAlarmasChange(nuevasAlarmas)
+                },
+                onGuardarAlarmas = { pacienteId, nuevasAlarmas ->
+                    println("🎯 [PacientesScreen] Guardando alarmas para paciente ID: $pacienteId")
+                    println("   Nuevas alarmas: ${nuevasAlarmas.size}")
+
+                    val alarmasDeOtrosPacientes = alarmas.filter { it.pacienteId != pacienteId }
+
+                    println("   Alarmas de otros pacientes: ${alarmasDeOtrosPacientes.size}")
+                    println("   IDs de otros pacientes: ${alarmasDeOtrosPacientes.map { it.pacienteId }.distinct()}")
+
+                    val todasLasAlarmas = alarmasDeOtrosPacientes + nuevasAlarmas
+
+                    println("🎯 Total alarmas: ${alarmas.size} → ${todasLasAlarmas.size}")
+                    println("   - De otros pacientes: ${alarmasDeOtrosPacientes.size}")
+                    println("   - Nuevas de este paciente: ${nuevasAlarmas.size}")
+
+                    nuevasAlarmas.forEachIndexed { index, alarma ->
+                        println("      Nueva alarma $index: ${alarma.titulo} (ID: ${alarma.id}) → PacienteID: '${alarma.pacienteId}'")
+                    }
+
+                    onAlarmasChange(todasLasAlarmas)
                 }
             )
         }
@@ -421,18 +617,80 @@ fun FormularioPacienteScreen(
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant),
             elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
         ) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value = nombre, onValueChange = onNombreChange, label = { Text("Nombre del paciente") }, modifier = Modifier.fillMaxWidth())
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(value = edad, onValueChange = { if (it.all { c -> c.isDigit() } || it.isEmpty()) onEdadChange(it) }, label = { Text("Edad") }, modifier = Modifier.weight(1f), keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number))
-                    OutlinedTextField(value = tipoDemencia, onValueChange = onTipoDemenciaChange, label = { Text("Tipo de demencia") }, modifier = Modifier.weight(1f))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                OutlinedTextField(
+                    value = nombre,
+                    onValueChange = onNombreChange,
+                    label = { Text("Nombre del paciente *") },
+                    modifier = Modifier.fillMaxWidth(),
+                    isError = nombre.isBlank(),
+                    supportingText = { if (nombre.isBlank()) Text("El nombre es obligatorio") }
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedTextField(
+                        value = edad,
+                        onValueChange = { if (it.all { c -> c.isDigit() } || it.isEmpty()) onEdadChange(it) },
+                        label = { Text("Edad") },
+                        modifier = Modifier.weight(1f),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number)
+                    )
+
+                    OutlinedTextField(
+                        value = tipoDemencia,
+                        onValueChange = onTipoDemenciaChange,
+                        label = { Text("Tipo de demencia") },
+                        modifier = Modifier.weight(1f)
+                    )
                 }
-                OutlinedTextField(value = institucion, onValueChange = onInstitucionChange, label = { Text("Institución donde se encuentra") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = contactoEmergencia, onValueChange = onContactoEmergenciaChange, label = { Text("Contacto de emergencia") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = alergias, onValueChange = onAlergiasChange, label = { Text("Alergias") }, modifier = Modifier.fillMaxWidth())
-                OutlinedTextField(value = observaciones, onValueChange = onObservacionesChange, label = { Text("Observaciones") }, modifier = Modifier.fillMaxWidth(), minLines = 3)
+
+                OutlinedTextField(
+                    value = institucion,
+                    onValueChange = onInstitucionChange,
+                    label = { Text("Institución donde se encuentra") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = contactoEmergencia,
+                    onValueChange = onContactoEmergenciaChange,
+                    label = { Text("Contacto de emergencia") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = alergias,
+                    onValueChange = onAlergiasChange,
+                    label = { Text("Alergias") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                OutlinedTextField(
+                    value = observaciones,
+                    onValueChange = onObservacionesChange,
+                    label = { Text("Observaciones") },
+                    modifier = Modifier.fillMaxWidth(),
+                    minLines = 3,
+                    maxLines = 5
+                )
+
                 Spacer(modifier = Modifier.height(8.dp))
-                Button(onClick = onGuardar, modifier = Modifier.align(Alignment.End)) { Text("Guardar paciente") }
+
+                Button(
+                    onClick = onGuardar,
+                    modifier = Modifier.align(Alignment.End),
+                    enabled = nombre.isNotBlank()
+                ) {
+                    Text("Guardar paciente")
+                }
             }
         }
     }
@@ -441,32 +699,86 @@ fun FormularioPacienteScreen(
 @Composable
 fun ListaPacientesScreen(
     pacientes: MutableList<Paciente>,
-    onEliminar: (Paciente) -> Unit
+    alarmas: List<Alarma>,
+    onEliminar: (Paciente) -> Unit,
+    onGuardarAlarmas: (String, List<Alarma>) -> Unit
 ) {
+    var pacienteSeleccionado by remember { mutableStateOf<Paciente?>(null) }
+    var mostrarAlarmas by remember { mutableStateOf(false) }
+
+    println("📋 [ListaPacientesScreen] Renderizando - Pacientes: ${pacientes.size}, Alarmas totales: ${alarmas.size}")
+    println("   IDs pacientes: ${pacientes.map { it.id }}")
+    println("   IDs pacientes en alarmas: ${alarmas.map { it.pacienteId }.distinct()}")
+
     if (pacientes.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Text("No hay pacientes registrados", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
         }
     } else {
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(pacientes) { paciente ->
+            items(pacientes, key = { it.id }) { paciente ->
+                val alarmasDelPaciente = alarmas.filter { it.pacienteId == paciente.id }
+
+                println("🔍 [ListaPacientesScreen] Paciente: ${paciente.nombre} (ID: ${paciente.id})")
+                println("   Alarmas encontradas para este paciente: ${alarmasDelPaciente.size}")
+                println("   Total alarmas en sistema: ${alarmas.size}")
+                println("   IDs de pacientes en todas las alarmas: ${alarmas.map { it.pacienteId }.distinct()}")
+
+                if (alarmasDelPaciente.isNotEmpty()) {
+                    println("   Alarmas de ${paciente.nombre}: ${alarmasDelPaciente.map { it.titulo }}")
+                } else {
+                    println("   ⚠️ NO se encontraron alarmas para este paciente")
+                }
+
                 PacienteCard(
                     paciente = paciente,
+                    alarmas = alarmasDelPaciente,
                     onEliminar = { onEliminar(paciente) },
-                    onAccionFutura = { }
+                    onAccionFutura = {
+                        println("👉 [ListaPacientesScreen] Abriendo alarmas para: ${paciente.nombre}")
+                        pacienteSeleccionado = paciente
+                        mostrarAlarmas = true
+                    }
                 )
             }
         }
+    }
+
+    if (mostrarAlarmas && pacienteSeleccionado != null) {
+        val alarmasDelPaciente = alarmas.filter { it.pacienteId == pacienteSeleccionado!!.id }
+        println("🔄 [ListaPacientesScreen] Mostrando AlarmasScreen para ${pacienteSeleccionado!!.nombre} con ${alarmasDelPaciente.size} alarmas")
+
+        AlarmasScreen(
+            paciente = pacienteSeleccionado!!,
+            alarmasIniciales = alarmasDelPaciente,
+            onVolver = {
+                println("⬅️ [ListaPacientesScreen] Volviendo de AlarmasScreen")
+                mostrarAlarmas = false
+                pacienteSeleccionado = null
+            },
+            onGuardarAlarmas = { nuevasAlarmas ->
+                println("💾 [ListaPacientesScreen] Guardando ${nuevasAlarmas.size} alarmas para ${pacienteSeleccionado!!.nombre}")
+                onGuardarAlarmas(pacienteSeleccionado!!.id, nuevasAlarmas)
+                mostrarAlarmas = false
+                pacienteSeleccionado = null
+            }
+        )
     }
 }
 
 @Composable
 fun PacienteCard(
     paciente: Paciente,
+    alarmas: List<Alarma>,
     onEliminar: () -> Unit,
     onAccionFutura: () -> Unit
 ) {
     var mostrarDialogo by remember { mutableStateOf(false) }
+
+    // Forzar recomposición cuando cambian las alarmas
+    val alarmasActivas = remember(alarmas) {
+        alarmas.filter { it.activa }
+    }
 
     Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
         Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -478,13 +790,32 @@ fun PacienteCard(
                 Text(text = paciente.nombre, style = MaterialTheme.typography.titleMedium)
 
                 Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
+                    if (alarmasActivas.isNotEmpty()) {
+                        Surface(
+                            shape = MaterialTheme.shapes.small,
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            modifier = Modifier.padding(end = 4.dp)
+                        ) {
+                            Text(
+                                text = "${alarmasActivas.size} ⏰",
+                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
+
                     IconButton(onClick = onAccionFutura) {
                         Icon(
-                            Icons.Default.Edit,
-                            contentDescription = "Función futura",
-                            tint = MaterialTheme.colorScheme.primary
+                            Icons.Default.Alarm,
+                            contentDescription = "Configurar alarmas",
+                            tint = if (alarmasActivas.isNotEmpty())
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
                         )
                     }
 
@@ -515,6 +846,7 @@ fun PacienteCard(
             confirmButton = {
                 TextButton(
                     onClick = {
+                        println("✅ [PacienteCard] Confirmando eliminación de paciente: ${paciente.nombre}")
                         onEliminar()
                         mostrarDialogo = false
                     }
@@ -607,7 +939,6 @@ fun InfoRow(label: String, value: String, valueColor: Color = MaterialTheme.colo
     }
 }
 
-// Tema de la aplicación
 @Composable
 fun RecuerdosTheme(darkTheme: Boolean = false, content: @Composable () -> Unit) {
     MaterialTheme(
