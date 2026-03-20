@@ -4,17 +4,13 @@ plugins {
 }
 
 android {
-    namespace = "com.example.recuerdosMLJDMH"
-    compileSdk {
-        version = release(36) {
-            minorApiLevel = 1
-        }
-    }
+    namespace = "com.example.recuerdos"
+    compileSdk = 35
 
     defaultConfig {
-        applicationId = "com.example.recuerdosMLJDMH"
+        applicationId = "com.example.recuerdos"
         minSdk = 24
-        targetSdk = 36
+        targetSdk = 35
         versionCode = 1
         versionName = "1.0"
 
@@ -64,4 +60,6 @@ dependencies {
     implementation("com.google.accompanist:accompanist-permissions:0.35.0-alpha")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
+    implementation("com.google.android.material:material:1.11.0")
+    implementation("androidx.work:work-runtime-ktx:2.9.0")
 }

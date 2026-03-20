@@ -2,6 +2,15 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Permisos para notificaciones y alarmas -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+
+    <!-- Permiso para arrancar al iniciar el dispositivo (opcional) -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
@@ -11,20 +20,30 @@
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.Recuerdos">
+
         <activity
             android:name="com.example.recuerdos.SplashActivity"
             android:exported="true"
-            android:label="@string/app_name">
+            android:label="@string/app_name"
+            android:theme="@style/Theme.Recuerdos">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
         <activity
             android:name="com.example.recuerdos.MainActivity"
-            android:label="@string/app_name">
+            android:label="@string/app_name"
+            android:exported="false">
         </activity>
+
+        <!-- ⚠️ ELIMINADO: El receptor de WorkManager se declara automáticamente por la biblioteca -->
+
+        <receiver
+            android:name=".AlarmaReceiver"
+            android:enabled="true"
+            android:exported="false" />
     </application>
 
 </manifest>

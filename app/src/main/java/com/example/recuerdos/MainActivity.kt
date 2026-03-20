@@ -43,6 +43,18 @@ import java.util.Calendar
 import java.util.UUID
 import androidx.lifecycle.lifecycleScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import androidx.work.*
+import com.example.recuerdos.AlarmaManager
+import android.os.Build
+import android.provider.Settings
+import android.net.Uri
+import android.app.AlarmManager
+import android.content.Intent
+import androidx.activity.result.contract.ActivityResultContracts
+import android.content.pm.PackageManager
+import androidx.core.content.ContextCompat.checkSelfPermission
 
 // DataStore extension
 val Context.dataStore by preferencesDataStore(name = "user_preferences")
@@ -78,13 +90,11 @@ class UserPreferences(private val context: Context) {
         }
     }
 
-    // Guardar alarmas con NUEVO ORDEN: id|pacienteId|titulo|hora|minuto|activa|soloNotificacion|notas
     suspend fun saveAlarmas(alarmas: List<Alarma>) {
         val json = if (alarmas.isEmpty()) {
             ""
         } else {
             alarmas.joinToString("||") { a ->
-                // AHORA CON 7 CAMPOS (sin notas)
                 "${a.id}|${a.pacienteId}|${a.titulo}|${a.hora}|${a.minuto}|${a.activa}|${a.soloNotificacion}"
             }
         }
@@ -139,7 +149,6 @@ class UserPreferences(private val context: Context) {
             }
         }
 
-    // Leer alarmas con NUEVO ORDEN: id|pacienteId|titulo|hora|minuto|activa|soloNotificacion|notas
     val alarmas: Flow<List<Alarma>> = context.dataStore.data
         .map { preferences ->
             val json = preferences[ALARMAS_KEY] ?: ""
@@ -152,8 +161,8 @@ class UserPreferences(private val context: Context) {
                 val lista = json.split("||").mapNotNull { alarmaStr ->
                     if (alarmaStr.isBlank()) return@mapNotNull null
 
-                    val parts = alarmaStr.split("|", limit = 7)  // ⬅️ AHORA limit = 7
-                    if (parts.size >= 7) {  // ⬅️ AHORA verificamos 7 campos
+                    val parts = alarmaStr.split("|", limit = 7)
+                    if (parts.size >= 7) {
                         try {
                             val alarma = Alarma(
                                 id = parts[0],
@@ -163,7 +172,6 @@ class UserPreferences(private val context: Context) {
                                 minuto = parts[4].toIntOrNull() ?: 0,
                                 activa = parts[5].toBoolean(),
                                 soloNotificacion = parts[6].toBoolean()
-                                // ✅ NOTAS ELIMINADO
                             )
                             println("   ✅ Alarma: ${alarma.titulo} → Paciente ID: '${alarma.pacienteId}'")
                             alarma
@@ -182,7 +190,6 @@ class UserPreferences(private val context: Context) {
         }
 }
 
-// Data class Paciente (sin cambios)
 data class Paciente(
     val id: String = UUID.randomUUID().toString(),
     val nombre: String,
@@ -194,7 +201,6 @@ data class Paciente(
     val observaciones: String
 )
 
-// SIN notas
 data class Alarma(
     val id: String = UUID.randomUUID().toString(),
     val pacienteId: String = "",
@@ -203,7 +209,6 @@ data class Alarma(
     val minuto: Int,
     val activa: Boolean = true,
     val soloNotificacion: Boolean = false
-    // ✅ NOTAS ELIMINADO
 )
 
 enum class UserType(val displayName: String, val value: String) {
@@ -218,16 +223,53 @@ sealed class DestinoPrincipal(val titulo: String, val icono: ImageVector) {
 }
 
 class MainActivity : ComponentActivity() {
+
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            println("✅ Permiso de notificaciones concedido")
+        } else {
+            println("❌ Permiso de notificaciones denegado")
+        }
+    }
+
+
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
+        // Pedir permiso de notificaciones (Android 13+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+                requestPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
+
+        // Pedir permiso para alarmas exactas (Android 12+)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+            if (!alarmManager.canScheduleExactAlarms()) {
+                val intent = Intent(Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM)
+                intent.data = Uri.parse("package:$packageName")
+                startActivity(intent)
+            }
+        }
+
         lifecycleScope.launch {
             val userPrefs = UserPreferences(this@MainActivity)
-            val alarmasIniciales = userPrefs.alarmas.first()
-            println("🔍 [MainActivity] VERIFICACIÓN AL INICIAR: ${alarmasIniciales.size} alarmas encontradas")
-            alarmasIniciales.forEachIndexed { index, alarma ->
-                println("   [$index] ${alarma.titulo} (${alarma.hora}:${alarma.minuto}) → paciente: '${alarma.pacienteId}'")
-            }
+            NotificationUtils.createNotificationChannel(this@MainActivity)
+
+            val pacientes = userPrefs.pacientes.first()
+            val alarmas = userPrefs.alarmas.first()
+
+            AlarmaManager.reprogramarTodasLasAlarmas(
+                this@MainActivity,
+                alarmas,
+                pacientes
+            )
+
+            println("🔍 [MainActivity] Alarmas reprogramadas: ${alarmas.size}")
         }
 
         enableEdgeToEdge()
@@ -353,7 +395,6 @@ fun RegistrationScreen(onRegisterComplete: (String, String) -> Unit) {
 
 @Composable
 fun MainAppScreen(userName: String, userType: String) {
-
     val context = LocalContext.current
     val userPreferences = remember { UserPreferences(context) }
     val coroutineScope = rememberCoroutineScope()
@@ -438,6 +479,8 @@ fun MainAppScreen(userName: String, userType: String) {
                         alarmas = alarmas,
                         userName = userName,
                         userType = userType,
+                        coroutineScope = coroutineScope,
+                        context = context,
                         onPacientesChange = { nuevaListaPacientes ->
                             println("📝 [MainAppScreen] Cambiando pacientes: ${pacientes.size} → ${nuevaListaPacientes.size}")
                             pacientes = nuevaListaPacientes
@@ -471,6 +514,8 @@ fun PacientesScreen(
     alarmas: List<Alarma>,
     userName: String,
     userType: String,
+    coroutineScope: CoroutineScope,
+    context: Context,
     onPacientesChange: (List<Paciente>) -> Unit,
     onAlarmasChange: (List<Alarma>) -> Unit
 ) {
@@ -572,6 +617,22 @@ fun PacientesScreen(
                     val nuevasAlarmas = alarmas.filter { it.pacienteId != pacienteAEliminar.id }
                     println("   Alarmas eliminadas: ${alarmas.size - nuevasAlarmas.size}")
                     onAlarmasChange(nuevasAlarmas)
+
+                    coroutineScope.launch(Dispatchers.IO) {
+                        val userPrefs = UserPreferences(context)
+                        val pacientesActualizados = userPrefs.pacientes.first()
+                        val alarmasActualizadas = userPrefs.alarmas.first()
+
+                        println("🔄 [PacientesScreen] Reprogramando alarmas después de eliminar paciente")
+                        println("   Pacientes restantes: ${pacientesActualizados.size}")
+                        println("   Alarmas restantes: ${alarmasActualizadas.size}")
+
+                        AlarmaManager.reprogramarTodasLasAlarmas(
+                            context,
+                            alarmasActualizadas,
+                            pacientesActualizados
+                        )
+                    }
                 },
                 onGuardarAlarmas = { pacienteId, nuevasAlarmas ->
                     println("🎯 [PacientesScreen] Guardando alarmas para paciente ID: $pacienteId")
@@ -704,11 +765,9 @@ fun ListaPacientesScreen(
     onGuardarAlarmas: (String, List<Alarma>) -> Unit
 ) {
     var pacienteSeleccionado by remember { mutableStateOf<Paciente?>(null) }
-    var mostrarAlarmas by remember { mutableStateOf(false) }
+    val coroutineScope = rememberCoroutineScope()
 
     println("📋 [ListaPacientesScreen] Renderizando - Pacientes: ${pacientes.size}, Alarmas totales: ${alarmas.size}")
-    println("   IDs pacientes: ${pacientes.map { it.id }}")
-    println("   IDs pacientes en alarmas: ${alarmas.map { it.pacienteId }.distinct()}")
 
     if (pacientes.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -719,47 +778,37 @@ fun ListaPacientesScreen(
             items(pacientes, key = { it.id }) { paciente ->
                 val alarmasDelPaciente = alarmas.filter { it.pacienteId == paciente.id }
 
-                println("🔍 [ListaPacientesScreen] Paciente: ${paciente.nombre} (ID: ${paciente.id})")
-                println("   Alarmas encontradas para este paciente: ${alarmasDelPaciente.size}")
-                println("   Total alarmas en sistema: ${alarmas.size}")
-                println("   IDs de pacientes en todas las alarmas: ${alarmas.map { it.pacienteId }.distinct()}")
-
-                if (alarmasDelPaciente.isNotEmpty()) {
-                    println("   Alarmas de ${paciente.nombre}: ${alarmasDelPaciente.map { it.titulo }}")
-                } else {
-                    println("   ⚠️ NO se encontraron alarmas para este paciente")
-                }
-
                 PacienteCard(
                     paciente = paciente,
                     alarmas = alarmasDelPaciente,
                     onEliminar = { onEliminar(paciente) },
                     onAccionFutura = {
-                        println("👉 [ListaPacientesScreen] Abriendo alarmas para: ${paciente.nombre}")
-                        pacienteSeleccionado = paciente
-                        mostrarAlarmas = true
+                        println("👉 Abriendo alarmas para: ${paciente.nombre}")
+                        pacienteSeleccionado = null
+
+                        coroutineScope.launch {
+                            delay(100)
+                            pacienteSeleccionado = paciente
+                        }
                     }
                 )
             }
         }
     }
 
-    if (mostrarAlarmas && pacienteSeleccionado != null) {
+    if (pacienteSeleccionado != null) {
         val alarmasDelPaciente = alarmas.filter { it.pacienteId == pacienteSeleccionado!!.id }
-        println("🔄 [ListaPacientesScreen] Mostrando AlarmasScreen para ${pacienteSeleccionado!!.nombre} con ${alarmasDelPaciente.size} alarmas")
 
         AlarmasScreen(
             paciente = pacienteSeleccionado!!,
             alarmasIniciales = alarmasDelPaciente,
             onVolver = {
-                println("⬅️ [ListaPacientesScreen] Volviendo de AlarmasScreen")
-                mostrarAlarmas = false
+                println("⬅️ Cerrando alarmas manualmente con flecha")
                 pacienteSeleccionado = null
             },
             onGuardarAlarmas = { nuevasAlarmas ->
-                println("💾 [ListaPacientesScreen] Guardando ${nuevasAlarmas.size} alarmas para ${pacienteSeleccionado!!.nombre}")
+                println("💾 Guardando alarmas")
                 onGuardarAlarmas(pacienteSeleccionado!!.id, nuevasAlarmas)
-                mostrarAlarmas = false
                 pacienteSeleccionado = null
             }
         )
@@ -775,7 +824,6 @@ fun PacienteCard(
 ) {
     var mostrarDialogo by remember { mutableStateOf(false) }
 
-    // Forzar recomposición cuando cambian las alarmas
     val alarmasActivas = remember(alarmas) {
         alarmas.filter { it.activa }
     }
@@ -894,12 +942,24 @@ fun RecordatoriosScreen(userName: String) {
 
 @Composable
 fun PerfilScreen(userName: String, userType: String) {
-    Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
+    var expandedContactos by remember { mutableStateOf(false) }
+    var expandedInformacion by remember { mutableStateOf(false) }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp)
+            .verticalScroll(rememberScrollState())
+    ) {
+        // Card de perfil del usuario
         Card(
             modifier = Modifier.fillMaxWidth(),
             colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer)
         ) {
-            Column(modifier = Modifier.fillMaxWidth().padding(24.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
                 Surface(
                     modifier = Modifier.size(80.dp),
                     shape = MaterialTheme.shapes.medium,
@@ -907,26 +967,348 @@ fun PerfilScreen(userName: String, userType: String) {
                     tonalElevation = 0.dp
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text(text = userName.take(1).uppercase(), fontSize = 40.sp, color = MaterialTheme.colorScheme.onPrimary)
+                        Text(
+                            text = userName.take(1).uppercase(),
+                            fontSize = 40.sp,
+                            color = MaterialTheme.colorScheme.onPrimary
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.height(16.dp))
-                Text(text = userName, fontSize = 24.sp, color = MaterialTheme.colorScheme.primary)
-                Text(text = if (userType == "personal") "Usuario personal" else "Cuidador", fontSize = 16.sp)
+                Text(
+                    text = userName,
+                    fontSize = 24.sp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+                Text(
+                    text = if (userType == "personal") "Usuario personal" else "Cuidador",
+                    fontSize = 16.sp
+                )
             }
         }
 
         Spacer(modifier = Modifier.height(16.dp))
-        Card(modifier = Modifier.fillMaxWidth(), colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
-            Column(modifier = Modifier.fillMaxWidth().padding(16.dp)) {
-                Text(text = "Información de la cuenta", fontSize = 18.sp, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 12.dp))
+
+        // Información de la cuenta
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(
+                modifier = Modifier.fillMaxWidth().padding(16.dp)
+            ) {
+                Text(
+                    text = "Información de la cuenta",
+                    fontSize = 18.sp,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 12.dp)
+                )
                 HorizontalDivider()
                 InfoRow("Nombre", userName)
                 HorizontalDivider()
-                InfoRow("Tipo de usuario", if (userType == "personal") "Uso personal" else "Cuidador")
+                InfoRow(
+                    "Tipo de usuario",
+                    if (userType == "personal") "Uso personal" else "Cuidador"
+                )
                 HorizontalDivider()
                 InfoRow("Estado", "Registrado", MaterialTheme.colorScheme.primary)
             }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Menú desplegable: Contactos de apoyo
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Header clickeable
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { expandedContactos = !expandedContactos }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Phone,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "📞 Contactos de apoyo",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Icon(
+                        if (expandedContactos) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (expandedContactos) "Contraer" else "Expandir"
+                    )
+                }
+
+                // Contenido expandible
+                if (expandedContactos) {
+                    HorizontalDivider()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        // Contactos de apoyo
+                        ContactoItem(
+                            nombre = "Emergencias",
+                            numero = "911",
+                            icono = Icons.Default.Phone
+                        )
+                        ContactoItem(
+                            nombre = "Alerta Amber México",
+                            numero = "800 00 854 00",
+                            icono = Icons.Default.Warning
+                        )
+                        ContactoItem(
+                            nombre = "Instituto de la Memoria",
+                            numero = "477 187 0671",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                        ContactoItem(
+                            nombre = "Fiscalía del Estado de Guanajuato",
+                            numero = "473 735 2100",
+                            icono = Icons.Default.Balance
+                        )
+                        ContactoItem(
+                            nombre = "Alzheimer México IAP",
+                            numero = "55 5280 4202 / 55 2515 2218 / 55 5280 3349",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                        ContactoItem(
+                            nombre = "Federación Mexicana de Alzheimer",
+                            numero = "01 800 00 33362",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                        ContactoItem(
+                            nombre = "Clínica de la Memoria, Ciudad de México",
+                            numero = "55 3923-2052",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                        ContactoItem(
+                            nombre = "Fundación Alzheimer",
+                            numero = "55 5575 83 20",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                        ContactoItem(
+                            nombre = "Centro mexicano Alzheimer",
+                            numero = "564 814 31 51",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                        ContactoItem(
+                            nombre = "Alzheimer's Association",
+                            numero = "800 272 39 00",
+                            icono = Icons.Default.HealthAndSafety
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(modifier = Modifier.height(16.dp))
+
+        // Menú desplegable: Más información (Tipos de demencia)
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)
+        ) {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Header clickeable
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { expandedInformacion = !expandedInformacion }
+                        .padding(16.dp),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(24.dp)
+                        )
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Text(
+                            text = "ℹ️ Más información",
+                            fontSize = 18.sp,
+                            fontWeight = FontWeight.Medium,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                    Icon(
+                        if (expandedInformacion) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                        contentDescription = if (expandedInformacion) "Contraer" else "Expandir"
+                    )
+                }
+
+                // Contenido expandible
+                if (expandedInformacion) {
+                    HorizontalDivider()
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        // Información de los tipos de demencia
+                        InfoDemenciaItem(
+                            titulo = "Enfermedad de Creutzfeldt-Jakob",
+                            descripcion = "Causa un tipo de demencia que empeora con una rapidez inusual. Las causas más comunes de demencia, como el Alzheimer, la demencia con cuerpos de Lewy y la demencia frontotemporal, suelen progresar con mayor lentitud."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Demencia por cuerpos de Lewy",
+                            descripcion = "Tipo de demencia progresiva que conlleva un deterioro del pensamiento, el razonamiento y la autonomía."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Enfermedad de Alzheimer",
+                            descripcion = "Enfermedad que afecta las células del cerebro (neuronas), provocando que se degeneren y mueran. Quienes la padecen presentan un deterioro progresivo en la capacidad para procesar el pensamiento (Memoria, orientación, lenguaje, aprendizaje, cálculo, etc.)."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Síndrome de Down",
+                            descripcion = "Las personas con este padecimiento tienen un riesgo mucho mayor de desarrollar demencia a medida que envejecen."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Demencia frontotemporal",
+                            descripcion = "Se refiere a un grupo de trastornos causados por la pérdida progresiva de células nerviosas principalmente en los lóbulos frontales del cerebro (las áreas detrás de la frente) y/o sus lóbulos temporales (las regiones detrás de las orejas)."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Enfermedad de Huntington",
+                            descripcion = "Trastorno cerebral progresivo causado por un gen defectuoso. Esta enfermedad provoca cambios en la zona central del cerebro que afectan el movimiento, el estado de ánimo y la capacidad de razonamiento."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Demencia mixta",
+                            descripcion = "Enfermedad en la que se producen simultáneamente cambios cerebrales de más de una causa de demencia."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Hidrocefalia normotensiva",
+                            descripcion = "Trastorno cerebral en el que se acumula un exceso de líquido cefalorraquídeo (LCR) en los ventrículos del cerebro, lo que provoca problemas de pensamiento y razonamiento, dificultad para caminar y pérdida del control de la vejiga."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Atrofia cortical posterior",
+                            descripcion = "Degeneración gradual y progresiva de la capa externa del cerebro (la corteza) en la parte del cerebro ubicada en la parte posterior de la cabeza."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Demencia por enfermedad de Parkinson",
+                            descripcion = "Deterioro en las habilidades de pensamiento y razonamiento que se desarrolla en algunas personas que viven con Parkinson al menos un año después del diagnóstico."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Demencia vascular",
+                            descripcion = "Disminución de la capacidad de pensamiento causada por afecciones que bloquean o reducen el flujo sanguíneo a diversas regiones del cerebro, privándolas de oxígeno y nutrientes."
+                        )
+                        InfoDemenciaItem(
+                            titulo = "Síndrome de Korsakoff",
+                            descripcion = "Trastorno crónico de la memoria causado por una deficiencia grave de tiamina (vitamina B-1). Suele estar causado por el abuso de alcohol, pero otras afecciones también pueden causarlo."
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ContactoItem(
+    nombre: String,
+    numero: String,
+    icono: ImageVector
+) {
+    val context = LocalContext.current
+
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable {
+                // Al hacer clic, abrir el marcador con el número
+                val intent = Intent(Intent.ACTION_DIAL).apply {
+                    data = Uri.parse("tel:$numero".replace(" ", "").replace("/", ""))
+                }
+                context.startActivity(intent)
+            },
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                icono,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+            Spacer(modifier = Modifier.width(12.dp))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = nombre,
+                    fontWeight = FontWeight.Medium,
+                    fontSize = 14.sp
+                )
+                Text(
+                    text = numero,
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)
+                )
+            }
+            Icon(
+                Icons.Default.Call,
+                contentDescription = "Llamar",
+                tint = MaterialTheme.colorScheme.primary,
+                modifier = Modifier.size(20.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun InfoDemenciaItem(
+    titulo: String,
+    descripcion: String
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp)
+        ) {
+            Text(
+                text = titulo,
+                fontWeight = FontWeight.Bold,
+                fontSize = 14.sp,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = descripcion,
+                fontSize = 12.sp,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.8f),
+                lineHeight = 16.sp
+            )
         }
     }
 }

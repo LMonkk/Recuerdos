@@ -11,12 +11,18 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.scale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import java.util.Calendar
 import java.util.UUID
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.delay
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -26,13 +32,21 @@ fun AlarmasScreen(
     onVolver: () -> Unit,
     onGuardarAlarmas: (List<Alarma>) -> Unit
 ) {
+    val context = LocalContext.current
     var alarmas by remember { mutableStateOf(alarmasIniciales) }
     var mostrarDialogoNuevaAlarma by remember { mutableStateOf(false) }
-
-    // Variable para controlar si estamos en proceso de guardado
     var guardando by remember { mutableStateOf(false) }
 
-    // Función para guardar cambios
+    // 🔍 LOGS DE VERIFICACIÓN DE IDS
+    println("=".repeat(50))
+    println("🔍 [AlarmasScreen] Verificando IDs para paciente: ${paciente.nombre} (ID: ${paciente.id})")
+    println("   Alarmas recibidas: ${alarmasIniciales.size}")
+    alarmasIniciales.forEachIndexed { index, alarma ->
+        println("   [$index] Alarma: ${alarma.titulo} - PacienteID: ${alarma.pacienteId} - ${if (alarma.pacienteId == paciente.id) "✅ OK" else "❌ ERROR"}")
+    }
+    println("=".repeat(50))
+
+    // Función para guardar cambios y reprogramar alarmas
     fun guardarCambios(nuevasAlarmas: List<Alarma>) {
         if (!guardando) {
             guardando = true
@@ -43,15 +57,31 @@ fun AlarmasScreen(
                 alarma.copy(pacienteId = paciente.id)
             }
 
-            onGuardarAlarmas(alarmasConPacienteId)
-            guardando = false
-        }
-    }
+            // Guardar en DataStore y ESPERAR a que termine
+            CoroutineScope(Dispatchers.Main).launch {
+                // Primero guardamos y esperamos
+                onGuardarAlarmas(alarmasConPacienteId)
 
-    // Efecto para guardar cuando cambian las alarmas
-    LaunchedEffect(alarmas) {
-        if (alarmas != alarmasIniciales) {
-            guardarCambios(alarmas)
+                // Pequeña pausa para asegurar que DataStore actualizó
+                delay(100)
+
+                // AHORA reprogramamos con los datos actualizados
+                val userPrefs = UserPreferences(context)
+                val todosLosPacientes = userPrefs.pacientes.first()
+                val todasLasAlarmas = userPrefs.alarmas.first()
+
+                println("🔄 [AlarmasScreen] Reprogramando todas las alarmas...")
+                println("   Total pacientes: ${todosLosPacientes.size}")
+                println("   Total alarmas: ${todasLasAlarmas.size}")
+
+                AlarmaManager.reprogramarTodasLasAlarmas(
+                    context,
+                    todasLasAlarmas,
+                    todosLosPacientes
+                )
+
+                guardando = false
+            }
         }
     }
 
@@ -143,15 +173,15 @@ fun AlarmasScreen(
 
         Spacer(modifier = Modifier.weight(1f))
 
-        // Botón guardar cambios - AHORA SIEMPRE VISIBLE pero deshabilitado si no hay cambios
+        // Botón guardar cambios
         Button(
             onClick = {
                 println("💾 [AlarmasScreen] Guardado manual de ${alarmas.size} alarmas")
                 guardarCambios(alarmas)
-                onVolver()
+                //onVolver()
             },
             modifier = Modifier.fillMaxWidth(),
-            enabled = !guardando  // Deshabilitar mientras se guarda
+            enabled = !guardando
         ) {
             if (guardando) {
                 Row(horizontalArrangement = Arrangement.Center) {
@@ -325,9 +355,24 @@ fun NuevaAlarmaDialog(
     onDismiss: () -> Unit,
     onGuardar: (Alarma) -> Unit
 ) {
+    // Obtener la hora actual + 1 minuto
+    val calendar = Calendar.getInstance()
+    val horaActual = calendar.get(Calendar.HOUR_OF_DAY)
+    val minutoActual = calendar.get(Calendar.MINUTE)
+
+    // Calcular hora y minuto para dentro de 1 minuto
+    var horaInicial = horaActual
+    var minutoInicial = minutoActual + 1
+
+    // Ajustar si los minutos superan 59
+    if (minutoInicial >= 60) {
+        minutoInicial = 0
+        horaInicial = (horaInicial + 1) % 24
+    }
+
     var titulo by remember { mutableStateOf("") }
-    var hora by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) }
-    var minuto by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.MINUTE)) }
+    var hora by remember { mutableIntStateOf(horaInicial) }
+    var minuto by remember { mutableIntStateOf(minutoInicial) }
     var soloNotificacion by remember { mutableStateOf(false) }
     var mostrarTimePicker by remember { mutableStateOf(false) }
 
@@ -421,7 +466,6 @@ fun NuevaAlarmaDialog(
                                     minuto = minuto,
                                     activa = true,
                                     soloNotificacion = soloNotificacion
-                                    // ✅ SIN NOTAS
                                 )
                                 onGuardar(nuevaAlarma)
                             }
@@ -455,9 +499,22 @@ fun TimePickerDialog(
     onTimeSelected: (Int, Int) -> Unit,
     onDismiss: () -> Unit
 ) {
+    // También actualizamos el TimePicker para que muestre la hora actual + 1 minuto
+    val calendar = Calendar.getInstance()
+    val horaActual = calendar.get(Calendar.HOUR_OF_DAY)
+    val minutoActual = calendar.get(Calendar.MINUTE)
+
+    var horaInicial = horaActual
+    var minutoInicial = minutoActual + 1
+
+    if (minutoInicial >= 60) {
+        minutoInicial = 0
+        horaInicial = (horaInicial + 1) % 24
+    }
+
     val timePickerState = rememberTimePickerState(
-        initialHour = Calendar.getInstance().get(Calendar.HOUR_OF_DAY),
-        initialMinute = Calendar.getInstance().get(Calendar.MINUTE),
+        initialHour = horaInicial,
+        initialMinute = minutoInicial,
         is24Hour = true
     )
 
