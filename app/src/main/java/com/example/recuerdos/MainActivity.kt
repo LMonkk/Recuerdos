@@ -764,8 +764,8 @@ fun ListaPacientesScreen(
     onEliminar: (Paciente) -> Unit,
     onGuardarAlarmas: (String, List<Alarma>) -> Unit
 ) {
-    var pacienteSeleccionado by remember { mutableStateOf<Paciente?>(null) }
-    val coroutineScope = rememberCoroutineScope()
+    // Usamos un Set para mantener múltiples pacientes expandidos
+    var pacientesExpandidos by remember { mutableStateOf<Set<String>>(emptySet()) }
 
     println("📋 [ListaPacientesScreen] Renderizando - Pacientes: ${pacientes.size}, Alarmas totales: ${alarmas.size}")
 
@@ -777,137 +777,430 @@ fun ListaPacientesScreen(
         LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             items(pacientes, key = { it.id }) { paciente ->
                 val alarmasDelPaciente = alarmas.filter { it.pacienteId == paciente.id }
+                val estaExpandido = pacientesExpandidos.contains(paciente.id)
 
-                PacienteCard(
+                PacienteCardConAlarmas(
                     paciente = paciente,
                     alarmas = alarmasDelPaciente,
-                    onEliminar = { onEliminar(paciente) },
-                    onAccionFutura = {
-                        println("👉 Abriendo alarmas para: ${paciente.nombre}")
-                        pacienteSeleccionado = null
-
-                        coroutineScope.launch {
-                            delay(100)
-                            pacienteSeleccionado = paciente
+                    estaExpandido = estaExpandido,
+                    onExpandirToggle = {
+                        if (estaExpandido) {
+                            pacientesExpandidos = pacientesExpandidos.minus(paciente.id)
+                        } else {
+                            pacientesExpandidos = pacientesExpandidos.plus(paciente.id)
                         }
+                    },
+                    onEliminar = { onEliminar(paciente) },
+                    onGuardarAlarmas = { nuevasAlarmas ->
+                        onGuardarAlarmas(paciente.id, nuevasAlarmas)
+                    }
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun PacienteCardConAlarmas(
+    paciente: Paciente,
+    alarmas: List<Alarma>,
+    estaExpandido: Boolean,
+    onExpandirToggle: () -> Unit,
+    onEliminar: () -> Unit,
+    onGuardarAlarmas: (List<Alarma>) -> Unit
+) {
+    var mostrarDialogoEliminar by remember { mutableStateOf(false) }
+
+    val alarmasActivas = remember(alarmas) {
+        alarmas.filter { it.activa }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth()) {
+            // Header del paciente (siempre visible)
+            Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(text = paciente.nombre, style = MaterialTheme.typography.titleMedium)
+
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        if (alarmasActivas.isNotEmpty()) {
+                            Surface(
+                                shape = MaterialTheme.shapes.small,
+                                color = MaterialTheme.colorScheme.primaryContainer,
+                                modifier = Modifier.padding(end = 4.dp)
+                            ) {
+                                Text(
+                                    text = "${alarmasActivas.size} ⏰",
+                                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                            }
+                        }
+
+                        // Botón de alarma - ahora expande/contrae
+                        IconButton(onClick = onExpandirToggle) {
+                            Icon(
+                                if (estaExpandido) Icons.Default.Close else Icons.Default.Alarm,
+                                contentDescription = if (estaExpandido) "Cerrar alarmas" else "Configurar alarmas",
+                                tint = if (alarmasActivas.isNotEmpty())
+                                    MaterialTheme.colorScheme.primary
+                                else
+                                    MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                            )
+                        }
+
+                        IconButton(onClick = { mostrarDialogoEliminar = true }) {
+                            Icon(
+                                Icons.Default.Delete,
+                                contentDescription = "Eliminar paciente",
+                                tint = MaterialTheme.colorScheme.error
+                            )
+                        }
+                    }
+                }
+
+                if (paciente.edad.isNotBlank()) Text("Edad: ${paciente.edad}", style = MaterialTheme.typography.bodyMedium)
+                if (paciente.tipoDemencia.isNotBlank()) Text("Demencia: ${paciente.tipoDemencia}", style = MaterialTheme.typography.bodySmall)
+                if (paciente.institucion.isNotBlank()) Text("Institución: ${paciente.institucion}", style = MaterialTheme.typography.bodySmall)
+                if (paciente.contactoEmergencia.isNotBlank()) Text("Contacto: ${paciente.contactoEmergencia}", style = MaterialTheme.typography.bodySmall)
+                if (paciente.alergias.isNotBlank()) Text("Alergias: ${paciente.alergias}", style = MaterialTheme.typography.bodySmall)
+                if (paciente.observaciones.isNotBlank()) Text("Obs: ${paciente.observaciones}", style = MaterialTheme.typography.bodySmall)
+            }
+
+            // Sección de alarmas (expandible, aparece debajo del paciente)
+            if (estaExpandido) {
+                HorizontalDivider()
+                AlarmasIntegrado(
+                    paciente = paciente,
+                    alarmasIniciales = alarmas,
+                    onGuardarAlarmas = { nuevasAlarmas ->
+                        onGuardarAlarmas(nuevasAlarmas)
                     }
                 )
             }
         }
     }
 
-    if (pacienteSeleccionado != null) {
-        val alarmasDelPaciente = alarmas.filter { it.pacienteId == pacienteSeleccionado!!.id }
-
-        AlarmasScreen(
-            paciente = pacienteSeleccionado!!,
-            alarmasIniciales = alarmasDelPaciente,
-            onVolver = {
-                println("⬅️ Cerrando alarmas manualmente con flecha")
-                pacienteSeleccionado = null
-            },
-            onGuardarAlarmas = { nuevasAlarmas ->
-                println("💾 Guardando alarmas")
-                onGuardarAlarmas(pacienteSeleccionado!!.id, nuevasAlarmas)
-                pacienteSeleccionado = null
-            }
-        )
-    }
-}
-
-@Composable
-fun PacienteCard(
-    paciente: Paciente,
-    alarmas: List<Alarma>,
-    onEliminar: () -> Unit,
-    onAccionFutura: () -> Unit
-) {
-    var mostrarDialogo by remember { mutableStateOf(false) }
-
-    val alarmasActivas = remember(alarmas) {
-        alarmas.filter { it.activa }
-    }
-
-    Card(modifier = Modifier.fillMaxWidth(), elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)) {
-        Column(modifier = Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(text = paciente.nombre, style = MaterialTheme.typography.titleMedium)
-
-                Row(
-                    horizontalArrangement = Arrangement.spacedBy(4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    if (alarmasActivas.isNotEmpty()) {
-                        Surface(
-                            shape = MaterialTheme.shapes.small,
-                            color = MaterialTheme.colorScheme.primaryContainer,
-                            modifier = Modifier.padding(end = 4.dp)
-                        ) {
-                            Text(
-                                text = "${alarmasActivas.size} ⏰",
-                                modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-
-                    IconButton(onClick = onAccionFutura) {
-                        Icon(
-                            Icons.Default.Alarm,
-                            contentDescription = "Configurar alarmas",
-                            tint = if (alarmasActivas.isNotEmpty())
-                                MaterialTheme.colorScheme.primary
-                            else
-                                MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
-                        )
-                    }
-
-                    IconButton(onClick = { mostrarDialogo = true }) {
-                        Icon(
-                            Icons.Default.Delete,
-                            contentDescription = "Eliminar paciente",
-                            tint = MaterialTheme.colorScheme.error
-                        )
-                    }
-                }
-            }
-
-            if (paciente.edad.isNotBlank()) Text("Edad: ${paciente.edad}", style = MaterialTheme.typography.bodyMedium)
-            if (paciente.tipoDemencia.isNotBlank()) Text("Demencia: ${paciente.tipoDemencia}", style = MaterialTheme.typography.bodySmall)
-            if (paciente.institucion.isNotBlank()) Text("Institución: ${paciente.institucion}", style = MaterialTheme.typography.bodySmall)
-            if (paciente.contactoEmergencia.isNotBlank()) Text("Contacto: ${paciente.contactoEmergencia}", style = MaterialTheme.typography.bodySmall)
-            if (paciente.alergias.isNotBlank()) Text("Alergias: ${paciente.alergias}", style = MaterialTheme.typography.bodySmall)
-            if (paciente.observaciones.isNotBlank()) Text("Obs: ${paciente.observaciones}", style = MaterialTheme.typography.bodySmall)
-        }
-    }
-
-    if (mostrarDialogo) {
+    // Diálogo de confirmación para eliminar
+    if (mostrarDialogoEliminar) {
         AlertDialog(
-            onDismissRequest = { mostrarDialogo = false },
+            onDismissRequest = { mostrarDialogoEliminar = false },
             title = { Text("Confirmar eliminación") },
             text = { Text("¿Estás seguro de que quieres eliminar a ${paciente.nombre}? Esta acción no se puede deshacer.") },
             confirmButton = {
                 TextButton(
                     onClick = {
-                        println("✅ [PacienteCard] Confirmando eliminación de paciente: ${paciente.nombre}")
+                        println("✅ Eliminando paciente: ${paciente.nombre}")
                         onEliminar()
-                        mostrarDialogo = false
+                        mostrarDialogoEliminar = false
                     }
                 ) {
                     Text("Eliminar", color = MaterialTheme.colorScheme.error)
                 }
             },
             dismissButton = {
-                TextButton(onClick = { mostrarDialogo = false }) {
+                TextButton(onClick = { mostrarDialogoEliminar = false }) {
                     Text("Cancelar")
                 }
             }
         )
+    }
+}
+
+@Composable
+fun AlarmasIntegrado(
+    paciente: Paciente,
+    alarmasIniciales: List<Alarma>,
+    onGuardarAlarmas: (List<Alarma>) -> Unit
+) {
+    var alarmas by remember { mutableStateOf(alarmasIniciales) }
+    var mostrarDialogoAlarma by remember { mutableStateOf(false) }
+    var alarmaEditando by remember { mutableStateOf<Alarma?>(null) }
+    val coroutineScope = rememberCoroutineScope()
+    val context = LocalContext.current
+
+    Column(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Header
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = "⏰ Alarmas para ${paciente.nombre}",
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Button(
+                onClick = { mostrarDialogoAlarma = true },
+                modifier = Modifier.height(36.dp)
+            ) {
+                Icon(Icons.Default.Add, contentDescription = "Agregar", modifier = Modifier.size(18.dp))
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("Nueva alarma", fontSize = 12.sp)
+            }
+        }
+
+        // Lista de alarmas
+        if (alarmas.isEmpty()) {
+            Box(
+                modifier = Modifier.fillMaxWidth().padding(vertical = 24.dp),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    "No hay alarmas configuradas para este paciente",
+                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                    fontSize = 14.sp
+                )
+            }
+        } else {
+            alarmas.forEach { alarma ->
+                AlarmaItemIntegrado(
+                    alarma = alarma,
+                    onToggleActivar = {
+                        val alarmaActualizada = alarma.copy(activa = !alarma.activa)
+                        alarmas = alarmas.map { if (it.id == alarma.id) alarmaActualizada else it }
+
+                        // Reprogramar después del cambio
+                        coroutineScope.launch {
+                            val userPrefs = UserPreferences(context)
+                            val pacientesActuales = userPrefs.pacientes.first()
+                            val todasLasAlarmas = alarmas.map {
+                                if (it.id == alarma.id) alarmaActualizada else it
+                            }
+                            AlarmaManager.reprogramarTodasLasAlarmas(context, todasLasAlarmas, pacientesActuales)
+                        }
+                    },
+                    onEditar = { alarmaEditando = alarma },
+                    onEliminar = {
+                        alarmas = alarmas.filter { it.id != alarma.id }
+                    }
+                )
+            }
+        }
+
+        // Botón guardar
+        Button(
+            onClick = {
+                println("💾 Guardando ${alarmas.size} alarmas para paciente ${paciente.nombre}")
+                onGuardarAlarmas(alarmas)
+            },
+            modifier = Modifier.fillMaxWidth(),
+            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+        ) {
+            Text("Guardar alarmas")
+        }
+    }
+
+    // Diálogo para crear/editar alarma
+    if (mostrarDialogoAlarma || alarmaEditando != null) {
+        CrearAlarmaDialogoIntegrado(
+            paciente = paciente,
+            alarmaExistente = alarmaEditando,
+            onDismiss = {
+                mostrarDialogoAlarma = false
+                alarmaEditando = null
+            },
+            onConfirmar = { titulo, hora, minuto, soloNotificacion ->
+                if (alarmaEditando != null) {
+                    // Editar alarma existente
+                    val alarmaActualizada = alarmaEditando!!.copy(
+                        titulo = titulo,
+                        hora = hora,
+                        minuto = minuto,
+                        soloNotificacion = soloNotificacion,
+                        activa = true
+                    )
+                    alarmas = alarmas.map {
+                        if (it.id == alarmaEditando!!.id) alarmaActualizada else it
+                    }
+                } else {
+                    // Crear nueva alarma
+                    val nuevaAlarma = Alarma(
+                        id = UUID.randomUUID().toString(),
+                        pacienteId = paciente.id,
+                        titulo = titulo,
+                        hora = hora,
+                        minuto = minuto,
+                        activa = true,
+                        soloNotificacion = soloNotificacion
+                    )
+                    alarmas = alarmas + nuevaAlarma
+                }
+                mostrarDialogoAlarma = false
+                alarmaEditando = null
+            }
+        )
+    }
+}
+
+@Composable
+fun CrearAlarmaDialogoIntegrado(
+    paciente: Paciente,
+    alarmaExistente: Alarma? = null,
+    onDismiss: () -> Unit,
+    onConfirmar: (titulo: String, hora: Int, minuto: Int, soloNotificacion: Boolean) -> Unit
+) {
+    var titulo by remember { mutableStateOf(alarmaExistente?.titulo ?: "Medicamento") }
+    var hora by remember { mutableStateOf(alarmaExistente?.hora ?: 9) }
+    var minuto by remember { mutableStateOf(alarmaExistente?.minuto ?: 0) }
+    var soloNotificacion by remember { mutableStateOf(alarmaExistente?.soloNotificacion ?: false) }
+    var mostrarTimePicker by remember { mutableStateOf(false) }
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (alarmaExistente != null) "Editar alarma" else "Nueva alarma") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                OutlinedTextField(
+                    value = titulo,
+                    onValueChange = { titulo = it },
+                    label = { Text("Título de la alarma") },
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Button(
+                    onClick = { mostrarTimePicker = true },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(Icons.Default.AccessTime, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("${String.format("%02d", hora)}:${String.format("%02d", minuto)}")
+                }
+
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Checkbox(
+                        checked = soloNotificacion,
+                        onCheckedChange = { soloNotificacion = it }
+                    )
+                    Text("Alarma silenciosa (solo notificación)")
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    if (titulo.isNotBlank()) {
+                        onConfirmar(titulo, hora, minuto, soloNotificacion)
+                    }
+                }
+            ) {
+                Text("Guardar")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("Cancelar")
+            }
+        }
+    )
+
+    // TimePicker
+    if (mostrarTimePicker) {
+        val timePickerState = remember { android.app.TimePickerDialog.OnTimeSetListener { _, hour, minute ->
+            hora = hour
+            minuto = minute
+            mostrarTimePicker = false
+        } }
+
+        DisposableEffect(Unit) {
+            val dialog = android.app.TimePickerDialog(
+                context,
+                timePickerState,
+                hora,
+                minuto,
+                true
+            )
+            dialog.setOnDismissListener { mostrarTimePicker = false }
+            dialog.show()
+            onDispose { dialog.dismiss() }
+        }
+    }
+}
+
+@Composable
+fun AlarmaItemIntegrado(
+    alarma: Alarma,
+    onToggleActivar: () -> Unit,
+    onEditar: () -> Unit,
+    onEliminar: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        )
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(12.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(
+                modifier = Modifier.weight(1f),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                // Icono de alarma
+                Icon(
+                    if (alarma.soloNotificacion) Icons.Default.Notifications else Icons.Default.Alarm,
+                    contentDescription = null,
+                    tint = if (alarma.activa) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(12.dp))
+
+                Column {
+                    Text(
+                        text = alarma.titulo,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = if (alarma.activa) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                    Text(
+                        text = "${String.format("%02d", alarma.hora)}:${String.format("%02d", alarma.minuto)}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (alarma.activa) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f)
+                    )
+                }
+            }
+
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                // Switch para activar/desactivar
+                Switch(
+                    checked = alarma.activa,
+                    onCheckedChange = { onToggleActivar() },
+                    modifier = Modifier.scale(0.8f)
+                )
+
+                IconButton(onClick = onEditar, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Edit, contentDescription = "Editar", modifier = Modifier.size(18.dp))
+                }
+
+                IconButton(onClick = onEliminar, modifier = Modifier.size(36.dp)) {
+                    Icon(Icons.Default.Delete, contentDescription = "Eliminar", modifier = Modifier.size(18.dp), tint = MaterialTheme.colorScheme.error)
+                }
+            }
+        }
     }
 }
 
